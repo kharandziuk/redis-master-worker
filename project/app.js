@@ -2,47 +2,36 @@ var redis = require("redis"),
     _ = require('underscore'),
     async = require('async'),
     client = redis.createClient();
-    //client2 = redis.createClient(),
-    //msg_count = 0;
+    listener = redis.createClient();
 
-//client1.on("subscribe", function (channel, count) {
-//    client2.publish("a nice channel", "I am sending a message.");
-//    client2.publish("a nice channel", "I am sending a second message.");
-//    client2.publish("a nice channel", "I am sending my last message.");
-//});
-//
-//client1.on("message", function (channel, message) {
-//    console.log("client1 channel " + channel + ": " + message);
-//    msg_count += 1;
-//    if (msg_count === 3) {
-//        client1.unsubscribe();
-//        client1.end();
-//        client2.end();
-//    }
-//});
-
-//client1.incr("did a thing");
+listener.subscribe("channel");
 var isMaster = false,
-    SEMAPHORE_ADDRESS = 'semaphore'
+    SEMAPHORE_ADDRESS = 'semaphore';
+listener.on('message', function() {
+  if(isMaster) {return;}
+  console.log('message', arguments);
+});
 var lifeCycle = function(next) {
   if(isMaster) {
     client.set([SEMAPHORE_ADDRESS, true, 'EX', 5], function(err, val) {
       console.log('master lifecycle');
       if(err !== null) { throw err; }
-      if(val === null) {
-        assert(false);
-      } else if(val === 'OK') {
-        console.log('I`m master');
-        console.log('everything ok; give them some tasks');
+      else if(val === 'OK') {
+        console.log('everything ok; I will send slaves some tasks');
+        listener.publish('channel', 'message from master', function(err) {
+          console.log(err);
+          if(err) {throw err;}
+        });
+      } else {
+        assert.fail();
       }
       next();
     });
   } else {
-    console.log('slave lifecycle');
     client.set([SEMAPHORE_ADDRESS, true, 'NX', 'EX', 5], function(err, val) {
       if(err !== null) { throw err; }
       if(val === null) {
-        console.log('slave');
+        console.log('slaves takes some tasks');
       } else if(val === 'OK') {
         console.log('I`m master');
         isMaster = true;
@@ -51,12 +40,13 @@ var lifeCycle = function(next) {
     });
   }
 };
-async.forever(
-  function(next) {
-    setTimeout(
-      lifeCycle.bind(null, next),
-      1000
-    );
-  }
-);
-//client1.subscribe("a nice channel");
+listener.on('subscribe', function() {
+  async.forever(
+    function(next) {
+      setTimeout(
+        lifeCycle.bind(null, next),
+        1000
+      );
+    }
+  );
+});
