@@ -1,52 +1,185 @@
 var redis = require("redis"),
-    _ = require('underscore'),
     async = require('async'),
-    client = redis.createClient();
-    listener = redis.createClient();
+    assert = require('assert'),
+    EventEmitter = require('events').EventEmitter,
+    util = require('util'),
+    uuid = require('node-uuid'),
+    _ = require('underscore'),
+    log = console.log;
 
-listener.subscribe("channel");
-var isMaster = false,
-    SEMAPHORE_ADDRESS = 'semaphore';
-listener.on('message', function() {
-  if(isMaster) {return;}
-  console.log('message', arguments);
-});
-var lifeCycle = function(next) {
-  if(isMaster) {
-    client.set([SEMAPHORE_ADDRESS, true, 'EX', 5], function(err, val) {
-      console.log('master lifecycle');
+
+// constants
+var SEMAPHORE_ADDRESS = 'semaphore',
+    MASTER_TO_WORKER_CHANNEL = 'MASTER-TO-WORKER-CHANNEL',
+    WORKER_TO_MASTER_CHANNEL = 'WORKER-TO-MASTER-CHANNEL',
+    ASKER_MODES = {
+      ASK: 0,
+      RENEW: 1
+    },
+    COMMAND = {
+      CHECK: 'check',
+      JOB:  'JOB',
+      ASK_JOB: 'ask_job'
+    };
+
+
+var SemaphoreAsker = function(client) {
+  var self = this;
+  self.mode = ASKER_MODES.ASK;
+  var ask = function (next) {
+    client.set([SEMAPHORE_ADDRESS, true, 'NX', 'EX', 5], function(err, val) {
+      console.log('in loop');
       if(err !== null) { throw err; }
-      else if(val === 'OK') {
-        console.log('everything ok; I will send slaves some tasks');
-        listener.publish('channel', 'message from master', function(err) {
-          console.log(err);
-          if(err) {throw err;}
-        });
-      } else {
+      if(val === 'OK') {
+        self.emit('crown');
+      } else if (val !== null){
         assert.fail();
       }
       next();
     });
-  } else {
-    client.set([SEMAPHORE_ADDRESS, true, 'NX', 'EX', 5], function(err, val) {
+  };
+  var renew = function (next) {
+    client.set([SEMAPHORE_ADDRESS, true, 'EX', 5], function(err, val) {
+      console.log('in renew loop');
       if(err !== null) { throw err; }
-      if(val === null) {
-        console.log('slaves takes some tasks');
-      } else if(val === 'OK') {
-        console.log('I`m master');
-        isMaster = true;
+      if(val !== 'OK') {
+        assert.fail('something goes wrong');
       }
       next();
     });
-  }
-};
-listener.on('subscribe', function() {
+  };
   async.forever(
     function(next) {
+      var callbacks = {};
+      callbacks[ASKER_MODES.ASK] = ask;
+      callbacks[ASKER_MODES.RENEW] = renew;
       setTimeout(
-        lifeCycle.bind(null, next),
+        callbacks[self.mode].bind(self, next),
         1000
       );
     }
   );
-});
+};
+util.inherits(SemaphoreAsker,  EventEmitter);
+
+var Minion = function() {
+  var self = this;
+  self.id = uuid.v4();
+  self.isMaster = false;
+  var subscribeClient = redis.createClient();
+  var operationClient = redis.createClient();
+  subscribeClient.subscribe(MASTER_TO_WORKER_CHANNEL);
+  subscribeClient.on('subscribe', function(channel, count) {
+    switch(channel) {
+      case MASTER_TO_WORKER_CHANNEL:
+        console.log(MASTER_TO_WORKER_CHANNEL);
+        assert(!self.isMaster);
+        break;
+      case WORKER_TO_MASTER_CHANNEL: 
+        console.log(WORKER_TO_MASTER_CHANNEL);
+        assert(self.isMaster);
+        break;
+      default:
+        assert.fail();
+    }
+  });
+  subscribeClient.on('message', function(channel, message) {
+    log(message);
+    message = JSON.parse(message);
+    assert(!_.isUndefined(message.type));
+    log(channel);
+    switch(channel) {
+      case MASTER_TO_WORKER_CHANNEL:
+        self.workerMessageHandler(message);
+        break;
+      case WORKER_TO_MASTER_CHANNEL: 
+        self.masterMessageHandler(message);
+        break;
+      default:
+        assert.fail();
+    }
+  });
+  self.subscribeClient = subscribeClient;
+  self.operationClient = operationClient;
+  self.asker = new SemaphoreAsker(operationClient);
+  self.asker.on('crown', function() {
+    self.upgradeToMaster();
+  });
+};
+
+Minion.prototype.masterMessageHandler = function (message) {
+  assert(this.isMaster);
+  switch(message.type) {
+    case COMMAND.ASK_JOB:
+      log('master gives a job');
+      this.operationClient.publish(
+        MASTER_TO_WORKER_CHANNEL, 
+        JSON.stringify({type: COMMAND.JOB, body: this.getMessage()})
+      );
+      break;
+    default:
+      assert.fail();
+  }
+
+};
+
+Minion.prototype.workerMessageHandler = function (message) {
+  //assert(!this.isMaster);
+  switch(message.type) {
+    case(COMMAND.CHECK):
+      log(this.id, 'ask job');
+      this.operationClient.publish(
+          WORKER_TO_MASTER_CHANNEL,
+          JSON.stringify({type: COMMAND.ASK_JOB, id: this.id})
+      );
+      break;
+    case(COMMAND.JOB):
+      this.eventHanler(message.body, this.onMessageProcessed);
+      break;
+    default:
+      assert.fail();
+  }
+};
+
+Minion.prototype.onMessageProcessed = function(err, data) {
+  if (err) {
+    log(data + "handled with error");
+  }
+  log('processed', data);
+};
+
+Minion.prototype.getMessage = function () {
+  this.cnt = this.cnt || 0;
+  return this.cnt++;
+};
+
+Minion.prototype.eventHanler = function(msg, callback) {
+  function onComplete() {
+    var error = Math.random() > 0.85;
+    callback(error, msg);
+  }
+  setTimeout(onComplete, Math.floor(Math.random()*1000));
+};
+
+Minion.prototype.upgradeToMaster = function() {
+  var self = this;
+  this.isMaster = true;
+  this.asker.mode = ASKER_MODES.RENEW;
+  this.subscribeClient.unsubscribe(MASTER_TO_WORKER_CHANNEL);
+  this.subscribeClient.subscribe(WORKER_TO_MASTER_CHANNEL);
+
+  self.subscribeClient.on('unsubscribe', function(channel, count) {
+    async.forever(
+      function(next) {
+        console.log('kapa');
+        self.operationClient.publish(MASTER_TO_WORKER_CHANNEL, JSON.stringify({type: COMMAND.CHECK}));
+        setTimeout(
+          next,
+          1000
+        );
+      }
+    );
+  });
+};
+
+new Minion();
