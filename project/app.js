@@ -114,7 +114,10 @@ Minion.prototype.masterMessageHandler = function (message) {
       log('master gives a job');
       this.operationClient.publish(
         MASTER_TO_WORKER_CHANNEL, 
-        JSON.stringify({type: COMMAND.JOB, body: this.getMessage()})
+        JSON.stringify({
+          type: COMMAND.JOB,
+          id: message.id,
+          body: this.getMessage()})
       );
       break;
     default:
@@ -134,7 +137,9 @@ Minion.prototype.workerMessageHandler = function (message) {
       );
       break;
     case(COMMAND.JOB):
-      this.eventHanler(message.body, this.onMessageProcessed);
+      if(this.id === message.id){
+        this.eventHanler(message.body, this.onMessageProcessed.bind(this));
+      }
       break;
     default:
       assert.fail();
@@ -143,8 +148,9 @@ Minion.prototype.workerMessageHandler = function (message) {
 
 Minion.prototype.onMessageProcessed = function(err, data) {
   if (err) {
-    log(data + "handled with error");
+    this.operationClient.lpush('errors', data);
   }
+  this.operationClient.lpush('processed', data);
   log('processed', data);
 };
 
