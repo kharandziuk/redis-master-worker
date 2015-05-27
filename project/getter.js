@@ -1,5 +1,5 @@
 var redis = require("redis"),
-    client = redis.createClient(),
+    client = redis.createClient('6379', 'redis');
     Bacon = require('baconjs'),
     _ = require('underscore');
 

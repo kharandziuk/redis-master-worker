@@ -27,7 +27,7 @@ var SemaphoreAsker = function(client) {
   var self = this;
   self.mode = ASKER_MODES.ASK;
   var ask = function (next) {
-    client.set([SEMAPHORE_ADDRESS, true, 'NX', 'EX', 5], function(err, val) {
+    client.set([SEMAPHORE_ADDRESS, true, 'NX', 'EX', 1], function(err, val) {
       console.log('in loop');
       if(err !== null) { throw err; }
       if(val === 'OK') {
@@ -39,7 +39,7 @@ var SemaphoreAsker = function(client) {
     });
   };
   var renew = function (next) {
-    client.set([SEMAPHORE_ADDRESS, true, 'EX', 5], function(err, val) {
+    client.set([SEMAPHORE_ADDRESS, true, 'EX', 1], function(err, val) {
       console.log('in renew loop');
       if(err !== null) { throw err; }
       if(val !== 'OK') {
@@ -62,12 +62,12 @@ var SemaphoreAsker = function(client) {
 };
 util.inherits(SemaphoreAsker,  EventEmitter);
 
-var Minion = function() {
+var Minion = function(redisHost) {
   var self = this;
   self.id = uuid.v4();
   self.isMaster = false;
-  var subscribeClient = redis.createClient();
-  var operationClient = redis.createClient();
+  var subscribeClient = redis.createClient('6379', 'redis');
+  var operationClient = redis.createClient('6379', 'redis');
   subscribeClient.subscribe(MASTER_TO_WORKER_CHANNEL);
   subscribeClient.on('subscribe', function(channel, count) {
     switch(channel) {

@@ -1,0 +1,12 @@
+worker:
+  image: node
+  volumes:
+  - .:/code
+  command: node /code/app.js
+  links:
+  - redis
+
+redis:
+  image: redis
+  ports:
+  - 6379
